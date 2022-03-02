@@ -332,15 +332,14 @@ class PioBlock(Elaboratable):
     def __init__(self, state_machine_count: int, addr_width: int):
         self.state_machine_count = state_machine_count
         self.addr_width = addr_width
+        self.inst_mem = Memory(width=16, depth=2**self.addr_width)
 
     def elaborate(self, platform):
         m = Module()
 
-        inst_mem = Memory(width=16, depth=2**self.addr_width)
-
         state_machines = []
         for i in range(self.state_machine_count):
-            state_machines.append(PioStateMachine(self.addr_width, inst_mem.read_port()))
+            state_machines.append(PioStateMachine(self.addr_width, self.inst_mem.read_port()))
             m.submodules["state_machine{}".format(i)] = state_machines[i]
         
         for sm in state_machines:
