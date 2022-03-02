@@ -106,6 +106,7 @@ class PioStateMachine(Elaboratable):
 
         self.en = Signal()
         self.pc = Signal(addr_width)
+        assert (inst_read_port.domain == "comb")
         self._inst_read_port = inst_read_port
 
         self.wrap_top = Signal(addr_width, reset = 31)
@@ -134,17 +135,15 @@ class PioStateMachine(Elaboratable):
 
         delay_counter = Signal(5)
 
-        new_pc = Signal(self.addr_width)
-
         m.d.comb += [
-            inst_rdport.addr.eq(new_pc),
+            inst_rdport.addr.eq(self.pc),
             decoder.inst.eq(inst_rdport.data),
         ]
 
-        with m.If(new_pc == self.wrap_top):
-            m.d.sync += self.pc.eq(self.wrap_bottom)
-        with m.Else():
-            m.d.sync += self.pc.eq(new_pc)
+        # with m.If(new_pc == self.wrap_top):
+        #     m.d.sync += self.pc.eq(self.wrap_bottom)
+        # with m.Else():
+        #     m.d.sync += self.pc.eq(new_pc)
         
         with m.If(self.en):
             with m.FSM() as fsm:
@@ -153,7 +152,13 @@ class PioStateMachine(Elaboratable):
                     with m.If(decoder.invalid):
                         m.d.sync += self.error_reason.eq(ErrorReason.INVALID_INST)
                         m.next = "ERROR"
-                    m.d.comb += new_pc.eq(self.pc + 1)
+
+                    with m.If(self.pc == self.wrap_top):
+                        m.d.sync += self.pc.eq(self.wrap_bottom)
+                    with m.Else():
+                        m.d.sync += self.pc.eq(self.pc + 1)
+
+                    # m.d.comb += new_pc.eq(self.pc + 1)
 
                     with m.If(decoder.delay_or_sideset != 0):
                         m.d.sync += delay_counter.eq(decoder.delay_or_sideset)
@@ -194,7 +199,7 @@ class PioStateMachine(Elaboratable):
                                 m.d.comb += do_jmp.eq(osr_counter != 0)
 
                         with m.If(do_jmp):
-                            m.d.comb += new_pc.eq(jmp_addr)
+                            m.d.sync += self.pc.eq(jmp_addr)
                         
                     with m.Elif(decoder.op == Inst.WAIT):
                         m.next = "NOT_IMPLEMENTED"
@@ -284,7 +289,7 @@ class PioStateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("101"):
                                 # PC
-                                m.d.comb += new_pc.eq(modified_src_data)
+                                m.d.sync += self.pc.eq(modified_src_data)
                             with m.Case("110"):
                                 # Input shift register
                                 m.d.sync += [
@@ -341,17 +346,13 @@ class PioBlock(Elaboratable):
         self.addr_width = addr_width
         self.inst_mem = Memory(width=16, depth=2**self.addr_width)
 
-        self.sm_en = [Signal()]*state_machine_count
+        self.sm = [PioStateMachine(self.addr_width, self.inst_mem.read_port(domain="comb")) for _ in range(state_machine_count)]
 
     def elaborate(self, platform):
         m = Module()
 
-        state_machines = []
         for i in range(self.state_machine_count):
-            state_machines.append(PioStateMachine(self.addr_width, self.inst_mem.read_port()))
-            m.submodules["state_machine{}".format(i)] = state_machines[i]
-
-            m.d.comb += state_machines[i].en.eq(self.sm_en[i])
+            m.submodules["state_machine{}".format(i)] = self.sm[i]
 
         return m
 
@@ -360,11 +361,13 @@ if __name__ == "__main__":
 
     dut = PioBlock(1, 5)
     dut.inst_mem.init = [
-        0b101_00011_010_01_001, # mov !X -> Y [3]
+        0b101_00000_010_01_001, # mov !X -> Y [0]
+        0b101_00000_001_00_010, # mov Y -> X [0]
     ]
     
     def bench():
-        yield dut.sm_en[0].eq(1)
+        yield dut.sm[0].wrap_top.eq(1)
+        yield dut.sm[0].en.eq(1)
 
         for _ in range(12):
             yield
