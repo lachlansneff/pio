@@ -53,25 +53,26 @@ class InstDecoder(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        be_inst = Signal(16)
-
-        m.d.comb += be_inst.eq(self.inst[::-1])
-
         m.d.comb += [
-            self.op.eq(be_inst[:3]),
-            self.delay_or_sideset.eq(be_inst[3:8]),
-            self.push_pull.eq(be_inst[8]),
-            self.rest.eq(be_inst[8:]),
+            self.op.eq(self.inst.bit_select(13, 3)),
+            self.delay_or_sideset.eq(self.inst.bit_select(8, 5)),
+            self.push_pull.eq(self.inst[7]),
+            self.rest.eq(self.inst.bit_select(0, 8)),
         ]
 
         with m.If(self.op == Inst.PUSH_PULL):
-            m.d.comb += self.invalid.eq(self.rest[3:] == 0)
+            m.d.comb += self.invalid.eq(self.rest[:5] == 0)
         with m.Elif(self.op == Inst.IRQ):
-            m.d.comb += self.invalid.eq(self.rest[0] == 0)
+            m.d.comb += self.invalid.eq(self.rest[7] == 0)
         with m.Else():
             m.d.comb += self.invalid.eq(0)
 
         return m
+
+class ErrorReason(Enum):
+    NONE = 0
+    RESERVED = 1
+    INVALID_INST = 2
 
 class PioStateMachine(Elaboratable):
     """
@@ -87,6 +88,7 @@ class PioStateMachine(Elaboratable):
     wrap_top : Signal(addr_width, reset = 31), in
         When the `pc` hits this value, it is wrapped around to `wrap_bottom`.
     wrap_bottom : Signal(addr_width, reset = 0), in
+    error_reason : Signal(ErrorReason), out
 
     """
     def __init__(self, addr_width: int, inst_read_port):
@@ -110,6 +112,7 @@ class PioStateMachine(Elaboratable):
         self.wrap_bottom = Signal(addr_width, reset = 0)
 
         self.error = Signal()
+        self.error_reason = Signal(ErrorReason)
         
 
     def elaborate(self, platform):
@@ -134,7 +137,7 @@ class PioStateMachine(Elaboratable):
         new_pc = Signal(self.addr_width)
 
         m.d.comb += [
-            inst_rdport.addr.eq(self.pc),
+            inst_rdport.addr.eq(new_pc),
             decoder.inst.eq(inst_rdport.data),
         ]
 
@@ -148,6 +151,7 @@ class PioStateMachine(Elaboratable):
                 # If the decoder says the instruction is invalid, pause the state-machine.                
                 with m.State("EXEC"):
                     with m.If(decoder.invalid):
+                        m.d.sync += self.error_reason.eq(ErrorReason.INVALID_INST)
                         m.next = "ERROR"
                     m.d.comb += new_pc.eq(self.pc + 1)
 
@@ -156,9 +160,9 @@ class PioStateMachine(Elaboratable):
                         m.next = "DELAY"
 
                     with m.If(decoder.op == Inst.JMP):
-                        condition = decoder.rest.bit_select(0, 3)
-                        jmp_addr = decoder.rest.bit_select(3, 5)
-
+                        jmp_addr = decoder.rest.bit_select(0, 5)
+                        condition = decoder.rest.bit_select(5, 3)
+                        
                         do_jmp = Signal()
 
                         with m.Switch(condition):
@@ -212,11 +216,10 @@ class PioStateMachine(Elaboratable):
                     with m.Elif((decoder.op == Inst.PUSH_PULL) & (decoder.push_pull == PushPull.PULL)):
                         m.next = "NOT_IMPLEMENTED"
                     with m.Elif(decoder.op == Inst.MOV):
-                        dest = decoder.rest.bit_select(0, 3)
+                        src = decoder.rest.bit_select(0, 3)
                         op = decoder.rest.bit_select(3, 2)
-                        src = decoder.rest.bit_select(5, 3)
+                        dest = decoder.rest.bit_select(5, 3)
 
-                        dest_data = Signal(32)
                         modified_src_data = Signal(32)
                         src_data = Signal(32)
 
@@ -226,15 +229,16 @@ class PioStateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("001"):
                                 # Load from Scratch X
-                                m.d.comb += dest_data.eq(scratch.x)
+                                m.d.comb += src_data.eq(scratch.x)
                             with m.Case("010"):
                                 # Load from Scratch Y
-                                m.d.comb += dest_data.eq(scratch.y)
+                                m.d.comb += src_data.eq(scratch.y)
                             with m.Case("011"):
                                 # Load all zeros
-                                m.d.comb += dest_data.eq(0)
+                                m.d.comb += src_data.eq(0)
                             with m.Case("100"):
                                 # Reserved
+                                m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
                                 m.next = "ERROR"
                             with m.Case("101"):
                                 # Load from STATUS
@@ -258,6 +262,7 @@ class PioStateMachine(Elaboratable):
                                 m.d.comb += modified_src_data.eq(src_data[::-1])
                             with m.Case("11"):
                                 # Reserved
+                                m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
                                 m.next = "ERROR"
                         
                         with m.Switch(dest):
@@ -272,6 +277,7 @@ class PioStateMachine(Elaboratable):
                                 m.d.sync += scratch.y.eq(modified_src_data)
                             with m.Case("011"):
                                 # Reserved
+                                m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
                                 m.next = "ERROR"
                             with m.Case("100"):
                                 # EXEC
@@ -312,6 +318,7 @@ class PioStateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case():
                                 # Reserved
+                                m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
                                 m.next = "ERROR"
 
                 with m.State("DELAY"):
@@ -334,6 +341,8 @@ class PioBlock(Elaboratable):
         self.addr_width = addr_width
         self.inst_mem = Memory(width=16, depth=2**self.addr_width)
 
+        self.sm_en = [Signal()]*state_machine_count
+
     def elaborate(self, platform):
         m = Module()
 
@@ -341,9 +350,8 @@ class PioBlock(Elaboratable):
         for i in range(self.state_machine_count):
             state_machines.append(PioStateMachine(self.addr_width, self.inst_mem.read_port()))
             m.submodules["state_machine{}".format(i)] = state_machines[i]
-        
-        for sm in state_machines:
-            m.d.comb += sm.en.eq(1)
+
+            m.d.comb += state_machines[i].en.eq(self.sm_en[i])
 
         return m
 
@@ -351,7 +359,13 @@ if __name__ == "__main__":
     from amaranth.sim import Simulator
 
     dut = PioBlock(1, 5)
+    dut.inst_mem.init = [
+        0b101_00011_010_01_001, # mov !X -> Y [3]
+    ]
+    
     def bench():
+        yield dut.sm_en[0].eq(1)
+
         for _ in range(12):
             yield
 
