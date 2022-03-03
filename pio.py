@@ -79,7 +79,7 @@ class PioStateMachine(Elaboratable):
     
     Attributes
     ----------
-    en : Signal
+    en : Signal, in
         Enable the state machine
     addr_width : int
         The width of addresses, in bits
@@ -106,6 +106,7 @@ class PioStateMachine(Elaboratable):
 
         self.en = Signal()
         self.pc = Signal(addr_width)
+
         assert (inst_read_port.domain == "comb")
         self._inst_read_port = inst_read_port
 
@@ -138,6 +139,8 @@ class PioStateMachine(Elaboratable):
         m.d.comb += [
             inst_rdport.addr.eq(self.pc),
             decoder.inst.eq(inst_rdport.data),
+
+            clkdiv.en.eq(self.en),
         ]
 
         # with m.If(new_pc == self.wrap_top):
@@ -145,7 +148,7 @@ class PioStateMachine(Elaboratable):
         # with m.Else():
         #     m.d.sync += self.pc.eq(new_pc)
         
-        with m.If(self.en):
+        with m.If(clkdiv.clk_en):
             with m.FSM() as fsm:
                 # If the decoder says the instruction is invalid, pause the state-machine.                
                 with m.State("EXEC"):
@@ -361,8 +364,8 @@ if __name__ == "__main__":
 
     dut = PioBlock(1, 5)
     dut.inst_mem.init = [
-        0b101_00000_010_01_001, # mov !X -> Y [0]
-        0b101_00000_001_00_010, # mov Y -> X [0]
+        0b101_00001_010_01_001, # mov !X -> Y [1]
+        0b101_00001_001_00_010, # mov Y -> X [1]
     ]
     
     def bench():
