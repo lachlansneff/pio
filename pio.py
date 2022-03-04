@@ -1,6 +1,7 @@
 from amaranth import *
 from enum import Enum
 from clock_en_divider import ClockEnableDivider
+import piodisasm
 
 class Scratch:
     def __init__(self):
@@ -36,7 +37,7 @@ class PushPull(Enum):
 class InstDecoder(Elaboratable):
     def __init__(self):
         # In
-        self.inst = Signal(16)
+        self.inst = Signal(16, decoder=lambda inst: piodisasm.parse_to_str(inst, 0, 0))
 
         # Out
         self.op = Signal(Inst)
@@ -110,12 +111,17 @@ class PioStateMachine(Elaboratable):
         assert (inst_read_port.domain == "comb")
         self._inst_read_port = inst_read_port
 
-        self.wrap_top = Signal(addr_width, reset = 31)
+        self.wrap_top = Signal(addr_width, reset = 2**addr_width - 1)
         self.wrap_bottom = Signal(addr_width, reset = 0)
 
         self.error = Signal()
         self.error_reason = Signal(ErrorReason)
-        
+
+    def increment_pc(self, m: Module):
+        with m.If(self.pc == self.wrap_top):
+            m.d.sync += self.pc.eq(self.wrap_bottom)
+        with m.Else():
+            m.d.sync += self.pc.eq(self.pc + 1)
 
     def elaborate(self, platform):
         m = Module()
@@ -142,11 +148,6 @@ class PioStateMachine(Elaboratable):
 
             clkdiv.en.eq(self.en),
         ]
-
-        # with m.If(new_pc == self.wrap_top):
-        #     m.d.sync += self.pc.eq(self.wrap_bottom)
-        # with m.Else():
-        #     m.d.sync += self.pc.eq(new_pc)
         
         with m.If(clkdiv.clk_en):
             with m.FSM() as fsm:
@@ -156,16 +157,11 @@ class PioStateMachine(Elaboratable):
                         m.d.sync += self.error_reason.eq(ErrorReason.INVALID_INST)
                         m.next = "ERROR"
 
-                    with m.If(self.pc == self.wrap_top):
-                        m.d.sync += self.pc.eq(self.wrap_bottom)
-                    with m.Else():
-                        m.d.sync += self.pc.eq(self.pc + 1)
-
-                    # m.d.comb += new_pc.eq(self.pc + 1)
-
                     with m.If(decoder.delay_or_sideset != 0):
                         m.d.sync += delay_counter.eq(decoder.delay_or_sideset)
                         m.next = "DELAY"
+                    with m.Else():
+                        self.increment_pc(m)
 
                     with m.If(decoder.op == Inst.JMP):
                         jmp_addr = decoder.rest.bit_select(0, 5)
@@ -332,6 +328,7 @@ class PioStateMachine(Elaboratable):
                 with m.State("DELAY"):
                     m.d.sync += delay_counter.eq(delay_counter - 1)
                     with m.If(delay_counter == 1):
+                        self.increment_pc(m)
                         m.next = "EXEC"
 
                 m.d.comb += self.error.eq(fsm.ongoing("ERROR") | fsm.ongoing("NOT_IMPLEMENTED"))
