@@ -184,6 +184,10 @@ class Wait:
         m.d.comb += self.stall_next.eq(1)
         m.next = "WAIT"
 
+def saturating_add(x, y, limit):
+    added = x + y
+    return Mux(added[-1], limit, added[:-1])
+
 class PioStateMachine(Elaboratable):
     """
     
@@ -372,6 +376,7 @@ class PioStateMachine(Elaboratable):
                                 m.d.comb += src_data.eq(osr)
                         
                         bit_count = Mux(vars.bit_count == 0, 32, vars.bit_count)
+                        m.d.sync += isr_count.eq(saturating_add(isr_count, bit_count, 32))
 
                         with m.If(self.ctrl.shift.in_shiftdir == Ctrl.ShiftDirection.LEFT):
                             shifted_src_data = src_data << (32 - bit_count)
@@ -381,6 +386,52 @@ class PioStateMachine(Elaboratable):
                         
                     with m.Elif(decoder.op == Inst.OUT):
                         m.next = "NOT_IMPLEMENTED"
+                        vars = decoder.out
+                        shifted_data = Signal(32)
+                        shifted_osr = Signal(32)
+
+                        bit_count = Mux(vars.bit_count == 0, 32, vars.bit_count)
+                        m.d.sync += osr_count.eq(saturating_add(osr_count, bit_count, 32))
+
+                        with m.If(self.ctrl.shift.out_shiftdir == Ctrl.ShiftDirection.LEFT):
+                            m.d.comb += Cat(shifted_osr, shifted_data).eq(osr << bit_count)
+                        with m.Else(): # Shift Right
+                            temp_shift = Signal(32)
+                            m.d.comb += [
+                                Cat(temp_shift, shifted_osr).eq(Cat(osr, C(0, 32)) >> bit_count),
+                                shifted_data.eq(temp_shift >> (1 - bit_count)),
+                            ]
+                        
+                        m.d.sync += osr.eq(shifted_osr)
+
+                        with m.Switch(vars.dest):
+                            with m.Case("000"):
+                                # PINS
+                                m.next = "NOT_IMPLEMENTED"
+                            with m.Case("001"):
+                                # Scratch X
+                                m.d.sync += scratch.x.eq(shifted_data)
+                            with m.Case("010"):
+                                # Scratch Y
+                                m.d.sync += scratch.y.eq(shifted_data)
+                            with m.Case("011"):
+                                # NULL (discard data)
+                                pass
+                            with m.Case("100"):
+                                # PINDIRS
+                                m.next = "NOT_IMPLEMENTED"
+                            with m.Case("101"):
+                                # PC
+                                m.d.sync += self.pc.eq(shifted_data)
+                            with m.Case("110"):
+                                # ISR
+                                m.d.sync += [
+                                    isr.eq(shifted_data),
+                                    isr_count.eq(bit_count),
+                                ]
+                            with m.Case("111"):
+                                # EXEC
+                                m.next = "NOT_IMPLEMENTED"
                     
                     # PUSH
                     with m.Elif((decoder.op == Inst.PUSH_PULL) & (decoder.push_pull == PushPull.PUSH)):
