@@ -154,6 +154,9 @@ class PioStateMachine(Elaboratable):
         rx_fifo = SyncFIFO(width=32, depth=4)
 
         delay_counter = Signal(5)
+        
+        # Stall on the current instruction and rerun it on the next clock cycle
+        stall = Signal()
 
         m.d.comb += [
             inst_rdport.addr.eq(self.pc),
@@ -183,7 +186,7 @@ class PioStateMachine(Elaboratable):
                     with m.If(decoder.delay_or_sideset != 0):
                         m.d.sync += delay_counter.eq(decoder.delay_or_sideset)
                         m.next = "DELAY"
-                    with m.Else():
+                    with m.Elif(~stall):
                         self.increment_pc(m)
 
                     with m.If(decoder.op == Inst.JMP):
@@ -247,7 +250,10 @@ class PioStateMachine(Elaboratable):
 
                         # If the RX FIFO is full and `block` is set, block the state machine
                         with m.If(block & ~rx_fifo.w_rdy):
-                            pass
+                            # Stall the state machine until the next clock cycle
+                            # This will get run again then, and will continue
+                            # to stall until the RX FIFO is not full
+                            m.d.sync += stall.eq(1)
                         with m.Else():
                             with m.If(if_full & (isr_count < self.ctrl.shift.push_threshold)):
                                 pass
@@ -264,7 +270,31 @@ class PioStateMachine(Elaboratable):
 
                     # PULL
                     with m.Elif((decoder.op == Inst.PUSH_PULL) & (decoder.push_pull == PushPull.PULL)): # PULL
-                        m.next = "NOT_IMPLEMENTED"
+                        block = decoder.rest.bit_select(5, 1)
+                        if_empty = decoder.rest.bit_select(6, 1)
+
+                        with m.If(block & ~tx_fifo.r_rdy):
+                            # Stall the state machine until the next clock cycle
+                            # This will get run again then, and will continue
+                            # to stall until the TX FIFO is not full
+                            m.d.sync += stall.eq(1)
+                        with m.Else():
+                            with m.If(if_empty & (osr_count < self.ctrl.shift.pull_threshold)):
+                                pass
+                            with m.Else():
+                                # Fill OSR
+                                m.d.sync += osr_count.eq(32)
+
+                                # If the TX FIFO is not empty, read it
+                                with m.If(tx_fifo.r_rdy):
+                                    m.sync += [
+                                        osr.eq(tx_fifo.r_data),
+                                        tx_fifo.r_en.eq(1),
+                                    ]
+                                # Otherwise, copy scratch X into the OSR
+                                with m.Else():
+                                    m.sync += osr.eq(scratch.x)
+
                     with m.Elif(decoder.op == Inst.MOV):
                         src = decoder.rest.bit_select(0, 3)
                         op = decoder.rest.bit_select(3, 2)
