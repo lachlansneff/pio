@@ -564,8 +564,6 @@ class PioStateMachine(Elaboratable):
                                     osr_count.eq(0), # Set to full
                                 ]
                     with m.Elif(decoder.op == Inst.IRQ):
-                        m.next = "NOT_IMPLEMENTED"
-
                         vars = decoder.irq
                         irq_idx = Mux(vars.add_id, vars.idx + self.id, vars.idx)
                         
