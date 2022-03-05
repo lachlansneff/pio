@@ -4,7 +4,6 @@ from amaranth import *
 from amaranth.lib.fifo import SyncFIFO
 from enum import Enum
 from clock_en_divider import ClockEnableDivider
-import piodisasm
 
 class Config:
     def __init__(self, *, fifo_depth: int = 4, state_machines: int = 4, inst_mem_init=None):
@@ -70,7 +69,7 @@ class PushPull(Enum):
 class InstDecoder(Elaboratable):
     def __init__(self):
         # In
-        self.inst = Signal(16, decoder=lambda inst: piodisasm.parse_to_str(inst, 0, 0))
+        self.inst = Signal(16)
 
         # Out
         self.op = Signal(Inst)
