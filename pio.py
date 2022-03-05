@@ -30,6 +30,10 @@ class Scratch:
         self.y = Signal(32)
 
 class Ctrl:
+    class ShiftDirection(Enum):
+        LEFT = 0
+        RIGHT = 1
+
     def __init__(self, cfg: Config):
         self.clkdiv = Record([
             ("integer", 16),
@@ -45,6 +49,8 @@ class Ctrl:
         self.shift = Record([
             ("pull_threshold", 5),
             ("push_threshold", 5),
+            ("in_shiftdir", self.ShiftDirection),
+            ("out_shiftdir", self.ShiftDirection),
         ])
 
 class Inst(Enum):
@@ -177,7 +183,6 @@ class Wait:
         ]
         m.d.comb += self.stall_next.eq(1)
         m.next = "WAIT"
-
 
 class PioStateMachine(Elaboratable):
     """
@@ -340,17 +345,40 @@ class PioStateMachine(Elaboratable):
                                 m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
 
                     with m.Elif(decoder.op == Inst.IN):
-                        # bit_count = decoder.rest.bit_select(0, 5)
-                        # source = decoder.rest.bit_select(5, 3)
+                        vars = decoder.in_
+                        src_data = Signal(32)
 
-                        # with m.Switch(source):
-                        #     with m.Case("000"):
-                        #         # From PINS
-                        #         m.next = "NOT_IMPLEMENTED"
-                        #     with m.Case("001"):
-                        #         # From scratch.x
-                                
-                        m.next = "NOT_IMPLEMENTED"
+                        with m.Switch(vars.src):
+                            with m.Case("000"):
+                                # From PINS
+                                m.next = "NOT_IMPLEMENTED"
+                            with m.Case("001"):
+                                # From Scratch X
+                                m.d.comb += src_data.eq(scratch.x)
+                            with m.Case("010"):
+                                # Scratch Y
+                                m.d.comb += src_data.eq(scratch.y)
+                            with m.Case("011"):
+                                m.d.comb += src_data.eq(0)
+                            with m.Case("10-"):
+                                # Reserved
+                                m.next = "ERROR"
+                                m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
+                            with m.Case("110"):
+                                # ISR
+                                m.d.comb += src_data.eq(isr)
+                            with m.Case("111"):
+                                # OSR
+                                m.d.comb += src_data.eq(osr)
+                        
+                        bit_count = Mux(vars.bit_count == 0, 32, vars.bit_count)
+
+                        with m.If(self.ctrl.shift.in_shiftdir == Ctrl.ShiftDirection.LEFT):
+                            shifted_src_data = src_data << (32 - bit_count)
+                            m.d.sync += isr.eq((Cat(shifted_src_data, isr) << bit_count)[32:64])
+                        with m.Else(): # Shift right
+                            m.d.sync += isr.eq((Cat(isr, src_data) >> bit_count)[0:32])
+                        
                     with m.Elif(decoder.op == Inst.OUT):
                         m.next = "NOT_IMPLEMENTED"
                     
