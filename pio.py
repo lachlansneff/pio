@@ -1,5 +1,6 @@
 from amaranth import *
-from enum import Enum
+from amaranth.lib.fifo import SyncFIFO
+from enum import Enum, auto
 from clock_en_divider import ClockEnableDivider
 import piodisasm
 
@@ -18,6 +19,12 @@ class Ctrl:
         self.exec = Record([
             ("wrap_top", addr_width),
             ("wrap_bottom", addr_width),
+        ])
+        self.exec.wrap_top.reset = 2**addr_width - 1
+
+        self.shift = Record([
+            ("pull_threshold", 5),
+            ("push_threshold", 5),
         ])
 
 class Inst(Enum):
@@ -71,9 +78,10 @@ class InstDecoder(Elaboratable):
         return m
 
 class ErrorReason(Enum):
-    NONE = 0
-    RESERVED = 1
-    INVALID_INST = 2
+    NONE = auto()
+    RESERVED = auto()
+    INVALID_INST = auto()
+    BLOCKED_PUSH = auto()
 
 class PioStateMachine(Elaboratable):
     """
@@ -97,12 +105,14 @@ class PioStateMachine(Elaboratable):
 
         # The FIFO interfaces
         self.tx_fifo = Record([
-            ("en", 1),
-            ("data", 8),
+            ("w_rdy", 1),
+            ("w_en", 1),
+            ("w_data", 32),
         ])
         self.rx_fifi = Record([
-            ("rdy", 1),
-            ("data", 8),
+            ("r_rdy", 1),
+            ("r_en", 1),
+            ("r_data", 32),
         ])
 
         self.en = Signal()
@@ -111,8 +121,7 @@ class PioStateMachine(Elaboratable):
         assert (inst_read_port.domain == "comb")
         self._inst_read_port = inst_read_port
 
-        self.wrap_top = Signal(addr_width, reset = 2**addr_width - 1)
-        self.wrap_bottom = Signal(addr_width, reset = 0)
+        self.ctl = Ctrl(addr_width)
 
         self.error = Signal()
         self.error_reason = Signal(ErrorReason)
@@ -135,10 +144,14 @@ class PioStateMachine(Elaboratable):
 
         # Output Shift Register
         osr = Signal(32)
-        osr_counter = Signal(range(32))
+        osr_count = Signal(range(32))
         # Input Shift Register
         isr = Signal(32)
-        isr_counter = Signal(range(32))
+        isr_count = Signal(range(32))
+
+        # FIFOs
+        tx_fifo = SyncFIFO(width=32, depth=4)
+        rx_fifo = SyncFIFO(width=32, depth=4)
 
         delay_counter = Signal(5)
 
@@ -147,6 +160,16 @@ class PioStateMachine(Elaboratable):
             decoder.inst.eq(inst_rdport.data),
 
             clkdiv.en.eq(self.en),
+            
+            # Hook TX FIFO
+            tx_fifo.w_rdy.eq(self.tx_fifo.w_rdy),
+            tx_fifo.w_en.eq(self.tx_fifo.w_en),
+            tx_fifo.w_data.eq(self.tx_fifo.w_data),
+
+            # Hook up RX FIFO
+            rx_fifo.r_rdy.eq(self.rx_fifo.r_rdy),
+            rx_fifo.r_en.eq(self.rx_fifo.r_en),
+            rx_fifo.r_data.eq(self.rx_fifi.r_data),
         ]
         
         with m.If(clkdiv.clk_en):
@@ -195,7 +218,7 @@ class PioStateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("111"):
                                 # output shift register is not empty
-                                m.d.comb += do_jmp.eq(osr_counter != 0)
+                                m.d.comb += do_jmp.eq(osr_count != 0)
 
                         with m.If(do_jmp):
                             m.d.sync += self.pc.eq(jmp_addr)
@@ -203,8 +226,8 @@ class PioStateMachine(Elaboratable):
                     with m.Elif(decoder.op == Inst.WAIT):
                         m.next = "NOT_IMPLEMENTED"
                     with m.Elif(decoder.op == Inst.IN):
-                        # source = decoder.rest.bit_select(0, 3)
-                        # bit_count = decoder.rest.bit_select(3, 5)
+                        # bit_count = decoder.rest.bit_select(0, 5)
+                        # source = decoder.rest.bit_select(5, 3)
 
                         # with m.Switch(source):
                         #     with m.Case("000"):
@@ -212,12 +235,35 @@ class PioStateMachine(Elaboratable):
                         #         m.next = "NOT_IMPLEMENTED"
                         #     with m.Case("001"):
                         #         # From scratch.x
+                                
                         m.next = "NOT_IMPLEMENTED"
                     with m.Elif(decoder.op == Inst.OUT):
                         m.next = "NOT_IMPLEMENTED"
+                    
+                    # PUSH
                     with m.Elif((decoder.op == Inst.PUSH_PULL) & (decoder.push_pull == PushPull.PUSH)):
-                        m.next = "NOT_IMPLEMENTED"
-                    with m.Elif((decoder.op == Inst.PUSH_PULL) & (decoder.push_pull == PushPull.PULL)):
+                        block = decoder.rest.bit_select(5, 1)
+                        if_full = decoder.rest.bit_select(6, 1)
+
+                        # If the RX FIFO is full and `block` is set, block the state machine
+                        with m.If(block & ~rx_fifo.w_rdy):
+                            pass
+                        with m.Else():
+                            with m.If(if_full & (isr_count < self.ctrl.shift.push_threshold)):
+                                pass
+                            # If there's space in the RX FIFO
+                            with m.Elif(rx_fifo.w_rdy):
+                                m.d.sync += [
+                                    # Write the data
+                                    rx_fifo.w_data.eq(isr),
+                                    rx_fifo.w_en.eq(1),
+                                    # Clear the ISR
+                                    isr.eq(0),
+                                    isr_count.eq(0),
+                                ]
+
+                    # PULL
+                    with m.Elif((decoder.op == Inst.PUSH_PULL) & (decoder.push_pull == PushPull.PULL)): # PULL
                         m.next = "NOT_IMPLEMENTED"
                     with m.Elif(decoder.op == Inst.MOV):
                         src = decoder.rest.bit_select(0, 3)
@@ -293,13 +339,13 @@ class PioStateMachine(Elaboratable):
                                 # Input shift register
                                 m.d.sync += [
                                     isr.eq(modified_src_data),
-                                    isr_counter.eq(0), # Set to full
+                                    isr_count.eq(0), # Set to full
                                 ]
                             with m.Case("111"):
                                 # Output shift register
                                 m.d.sync += [
                                     osr.eq(modified_src_data),
-                                    osr_counter.eq(0), # Set to full
+                                    osr_count.eq(0), # Set to full
                                 ]
                     with m.Elif(decoder.op == Inst.IRQ):
                         m.next = "NOT_IMPLEMENTED"
@@ -366,7 +412,7 @@ if __name__ == "__main__":
     ]
     
     def bench():
-        yield dut.sm[0].wrap_top.eq(1)
+        yield dut.sm[0].ctrl.wrap_top.eq(1)
         yield dut.sm[0].en.eq(1)
 
         for _ in range(12):
