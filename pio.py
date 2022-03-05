@@ -121,7 +121,7 @@ class PioStateMachine(Elaboratable):
         assert (inst_read_port.domain == "comb")
         self._inst_read_port = inst_read_port
 
-        self.ctl = Ctrl(addr_width)
+        self.ctrl = Ctrl(addr_width)
 
         self.error = Signal()
         self.error_reason = Signal(ErrorReason)
