@@ -255,8 +255,8 @@ class PioStateMachine(Elaboratable):
         isr_count = Signal(range(32))
 
         # FIFOs
-        tx_fifo = SyncFIFO(width=32, depth=self.cfg.fifo_depth)
-        rx_fifo = SyncFIFO(width=32, depth=self.cfg.fifo_depth)
+        m.submodules.tx_fifo = tx_fifo = SyncFIFO(width=32, depth=self.cfg.fifo_depth)
+        m.submodules.rx_fifo = rx_fifo = SyncFIFO(width=32, depth=self.cfg.fifo_depth)
 
         delay_counter = Signal(5)
 
@@ -272,14 +272,14 @@ class PioStateMachine(Elaboratable):
             clkdiv.en.eq(self.en),
             
             # Hook TX FIFO
-            tx_fifo.w_rdy.eq(self.tx_fifo.w_rdy),
+            self.tx_fifo.w_rdy.eq(tx_fifo.w_rdy),
             tx_fifo.w_en.eq(self.tx_fifo.w_en),
             tx_fifo.w_data.eq(self.tx_fifo.w_data),
 
             # Hook up RX FIFO
-            rx_fifo.r_rdy.eq(self.rx_fifo.r_rdy),
+            self.rx_fifo.r_rdy.eq(rx_fifo.r_rdy),
             rx_fifo.r_en.eq(self.rx_fifo.r_en),
-            rx_fifo.r_data.eq(self.rx_fifo.r_data),
+            self.rx_fifo.r_data.eq(rx_fifo.r_data),
         ]
         
         with m.If(clkdiv.clk_en):
