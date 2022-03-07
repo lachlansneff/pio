@@ -52,6 +52,8 @@ class Ctrl:
             ("out_shiftdir", self.ShiftDirection),
         ])
 
+        self.en = Signal(1)
+
 class Inst(Enum):
     JMP = 0b000
     WAIT = 0b001
@@ -187,6 +189,59 @@ def saturating_add(x, y, limit):
     added = x + y
     return Mux(added[-1], limit, added[:-1])
 
+class Irq(Elaboratable):
+    def __init__(self):
+        self._buses = []
+
+    def port(self) -> Record:
+        irq_bus = Record([
+            ("idx", range(8)),
+            ("r_data", 1),
+            ("w_stb", 1),
+            ("w_data", 1),
+        ])
+
+        self._buses.append(irq_bus)
+        return irq_bus
+
+    def elaborate(self, platform):
+        m = Module()
+
+        data = Signal(8)
+
+        # Reading
+        for idx in range(8):
+            for bus in self._buses:
+                with m.If(bus.idx == idx):
+                    m.d.comb += bus.r_data.eq(data[idx])
+
+        for idx in range(8):
+            per_idx_w_stb = Signal()
+            per_idx_data = Signal()
+            first = True
+            for bus in self._buses:
+                if first:
+                    first = False
+                    with m.If(bus.w_stb & (idx == bus.idx)):
+                        m.d.comb += [
+                            per_idx_w_stb.eq(1),
+                            per_idx_data.eq(bus.w_data),
+                        ]
+                else:
+                    with m.Elif(bus.w_stb & (idx == bus.idx)):
+                        m.d.comb += [
+                            per_idx_w_stb.eq(1),
+                            per_idx_data.eq(bus.w_data),
+                        ]
+
+            with m.If(per_idx_w_stb):
+                m.d.sync += data[idx].eq(per_idx_data)
+        
+        return m
+            
+
+            
+
 class PioStateMachine(Elaboratable):
     """
     
@@ -204,7 +259,7 @@ class PioStateMachine(Elaboratable):
     error_reason : Signal(ErrorReason), out
 
     """
-    def __init__(self, *, id: int, cfg: Config):
+    def __init__(self, *, id: int, cfg: Config, irq_port, ctrl: Ctrl):
         self.cfg = cfg
         self.id = id
 
@@ -219,14 +274,12 @@ class PioStateMachine(Elaboratable):
             ("r_en", 1),
             ("r_data", 32),
         ])
-
-        self.en = Signal()
         
         self.pc = Signal(cfg.addr_width)
         self.inst = Signal(16)
 
-        self.ctrl = Ctrl(cfg)
-        self.irq = Signal(8)
+        self.ctrl = ctrl
+        self.irq_port = irq_port
 
         self.error = Signal()
         self.error_reason = Signal(ErrorReason)
@@ -242,7 +295,6 @@ class PioStateMachine(Elaboratable):
 
         m.submodules.clkdiv = clkdiv = ClockEnableDivider(16, 8)
         m.submodules.decoder = decoder = InstDecoder()
-
         # State
         scratch = Scratch()
 
@@ -268,7 +320,7 @@ class PioStateMachine(Elaboratable):
         m.d.comb += [
             decoder.inst.eq(self.inst),
 
-            clkdiv.en.eq(self.en),
+            clkdiv.en.eq(self.ctrl.en),
             
             # Hook TX FIFO
             self.tx_fifo.w_rdy.eq(tx_fifo.w_rdy),
@@ -568,10 +620,20 @@ class PioStateMachine(Elaboratable):
                         
                         with m.If(vars.clear):
                             # Clear the selected IRQ bit
-                            m.d.sync += self.irq.bit_select(irq_idx, 1).eq(0)
+                            m.d.comb += [
+                                self.irq_port.idx.eq(irq_idx),
+                                self.irq_port.w_data.eq(0),
+                                self.irq_port.w_stb.eq(1),
+                            ]
+                            # m.d.sync += self.irq.bit_select(irq_idx, 1).eq(0)
                         with m.Else():
                             # Set the selected IRQ bit
-                            m.d.sync += self.irq.bit_select(irq_idx, 1).eq(1)
+                            m.d.comb += [
+                                self.irq_port.idx.eq(irq_idx),
+                                self.irq_port.w_data.eq(1),
+                                self.irq_port.w_stb.eq(1),
+                            ]
+                            # m.d.sync += self.irq.bit_select(irq_idx, 1).eq(1)
                             wait.for_irq(m, irq_idx, Wait.Polarity.WAIT_FOR_0)
 
                     with m.Elif(decoder.op == Inst.SET):
@@ -606,13 +668,18 @@ class PioStateMachine(Elaboratable):
                     wait_over = Signal()
                     with m.Switch(wait.source):
                         with m.Case(Wait.Source.IRQ):
-                            with m.If(self.irq.bit_select(wait.irq_idx, 1) == wait.polarity):
+                            m.d.comb += self.irq_port.idx.eq(wait.irq_idx)
+                            with m.If(self.irq_port.r_data == wait.polarity):
                                 # The bit has changed!
                                 m.d.comb += wait_over.eq(1)
 
                                 # Clear the IRQ bit if we're waiting for 1.
                                 with m.If(wait.polarity == Wait.Polarity.WAIT_FOR_1):
-                                    m.d.sync += self.irq.bit_select(wait.irq_idx, 1).eq(0)
+                                    m.d.comb += [
+                                        self.irq_port.w_data.eq(0),
+                                        self.irq_port.w_stb.eq(1),
+                                    ]
+                                    # m.d.sync += self.irq.bit_select(wait.irq_idx, 1).eq(0)
 
                     with m.If(wait_over):
                         with m.If(decoder.delay != 0):
@@ -635,7 +702,10 @@ class PioStateMachine(Elaboratable):
 class PioBlock(Elaboratable):
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.sm = [PioStateMachine(id=id, cfg=cfg) for id in range(cfg.state_machines)]
+
+        self.irq = Irq()
+
+        self.sm = [Ctrl(cfg) for _ in range(cfg.state_machines)]
 
         self.inst_mem = Record([
             ("w_en", 1),
@@ -643,18 +713,10 @@ class PioBlock(Elaboratable):
             ("w_data", 16),
         ])
 
-        self.irq = Signal(4)
-
     def elaborate(self, platform):
         m = Module()
 
         inst_mem = Memory(width=16, depth=self.cfg.inst_mem_size, init=self.cfg.inst_mem_init)
-
-        full_irq = Signal(8)
-
-        m.d.comb += [
-            self.irq.eq(full_irq[0:4]),
-        ]
 
         m.submodules.inst_mem_wrport = inst_mem_wrport = inst_mem.write_port()
         m.d.comb += [
@@ -663,11 +725,13 @@ class PioBlock(Elaboratable):
             inst_mem_wrport.data.eq(self.inst_mem.w_data),
         ]
 
-        for i, sm in enumerate(self.sm):
-            m.submodules[f"sm{i}_rdport"] = rdport = inst_mem.read_port(domain="comb")
-            m.submodules["sm{}".format(i)] = sm
+        m.submodules.irq = self.irq
+
+        for id, ctrl in enumerate(self.sm):
+            m.submodules[f"sm{id}_rdport"] = rdport = inst_mem.read_port(domain="comb")
+            m.submodules[f"sm{id}"] = sm = PioStateMachine(id=id, cfg=self.cfg, irq_port=self.irq.port(), ctrl=ctrl)
+
             m.d.comb += [
-                full_irq.eq(sm.irq),
                 rdport.addr.eq(sm.pc),
                 sm.inst.eq(rdport.data),
             ]
@@ -678,16 +742,22 @@ if __name__ == "__main__":
     from amaranth.sim import Simulator
 
     dut = PioBlock(Config(
-        state_machines=1,
         inst_mem_init = [
             0b101_00001_010_01_001, # mov !X -> Y [1]
             0b101_00001_001_00_010, # mov Y -> X [1]
         ],
     ))
+    irq_port = dut.irq.port()
     
     def bench():
-        yield dut.sm[0].ctrl.exec.wrap_top.eq(1)
+        yield dut.sm[0].exec.wrap_top.eq(1)
         yield dut.sm[0].en.eq(1)
+
+        yield
+        
+        yield irq_port.idx.eq(0)
+        yield irq_port.w_data.eq(1)
+        yield irq_port.w_stb.eq(1)
 
         for _ in range(12):
             yield
