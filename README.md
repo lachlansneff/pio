@@ -9,4 +9,4 @@ programs that manipulate GPIOs and transfer data with precise timing.
 PIO originated as a feature of the Raspberry Pi 2040 MCU.
 
 This is a re-implementation of PIO in Amaranth, an HDL written in Python. Currently, this is still
-a work-in-progress!
+a work-in-progress and contributions are welcome!
