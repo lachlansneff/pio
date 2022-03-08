@@ -94,10 +94,18 @@ class StateMachine(Elaboratable):
         # or be used to tell the state machine not to advance the PC this cycle.
         stall_next = Signal()
         wait = Wait(stall_next)
+        skip_delay = Signal()
+
+        exec_injected_inst = Signal()
+        injected_inst = Signal(16)
+
+        with m.If(exec_injected_inst):
+            m.d.sync += exec_injected_inst.eq(0)
+            m.d.comb += decoder.inst.eq(injected_inst)
+        with m.Else():
+            m.d.comb += decoder.inst.eq(self.inst),
 
         m.d.comb += [
-            decoder.inst.eq(self.inst),
-
             clkdiv.en.eq(self.ctrl.en),
             
             # Hook TX FIFO
@@ -122,7 +130,7 @@ class StateMachine(Elaboratable):
                     with m.If(~stall_next):
                         self.increment_pc(m)
 
-                    with m.If(decoder.delay != 0):
+                    with m.If((decoder.delay != 0) & ~skip_delay):
                         m.d.sync += delay_counter.eq(decoder.delay)
                         m.d.comb += stall_next.eq(1)
                         m.next = "DELAY"
@@ -214,7 +222,6 @@ class StateMachine(Elaboratable):
                             m.d.sync += isr.eq((Cat(isr, src_data) >> bit_count)[0:32])
                         
                     with m.Elif(decoder.op == Inst.OUT):
-                        m.next = "NOT_IMPLEMENTED"
                         vars = decoder.out
                         shifted_data = Signal(32)
                         shifted_osr = Signal(32)
@@ -260,7 +267,11 @@ class StateMachine(Elaboratable):
                                 ]
                             with m.Case("111"):
                                 # EXEC
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += skip_delay.eq(1)
+                                m.d.sync += [
+                                    injected_inst.eq(shifted_data),
+                                    exec_injected_inst.eq(1),
+                                ]
                     
                     # PUSH
                     with m.Elif((decoder.op == Inst.PUSH_PULL) & (decoder.push_pull == PushPull.PUSH)):
@@ -376,7 +387,11 @@ class StateMachine(Elaboratable):
                                 m.next = "ERROR"
                             with m.Case("100"):
                                 # EXEC
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += skip_delay.eq(1)
+                                m.d.sync += [
+                                    injected_inst.eq(modified_src_data),
+                                    exec_injected_inst.eq(1),
+                                ]
                             with m.Case("101"):
                                 # PC
                                 m.d.sync += self.pc.eq(modified_src_data)
