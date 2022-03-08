@@ -5,11 +5,6 @@ from .clock_en_divider import ClockEnableDivider
 from .pio import Config, Ctrl
 from .decoder import Inst, PushPull, InstDecoder, Wait
 
-class Scratch:
-    def __init__(self):
-        self.x = Signal(32)
-        self.y = Signal(32)
-
 class ErrorReason(Enum):
     NONE = 0
     RESERVED = 1
@@ -74,7 +69,8 @@ class StateMachine(Elaboratable):
         m.submodules.clkdiv = clkdiv = ClockEnableDivider(16, 8)
         m.submodules.decoder = decoder = InstDecoder()
         # State
-        scratch = Scratch()
+        reg_x = Signal(32)
+        reg_y = Signal(32)
 
         # Output Shift Register
         osr = Signal(32)
@@ -145,21 +141,21 @@ class StateMachine(Elaboratable):
                                 m.d.comb += do_jmp.eq(1)
                             with m.Case("001"):
                                 # Scratch X is zero
-                                m.d.comb += do_jmp.eq(scratch.x == 0)
+                                m.d.comb += do_jmp.eq(reg_x == 0)
                             with m.Case("010"):
-                                # Scratch X is non-zero and then scratch.x is decremented
-                                m.d.comb += do_jmp.eq(scratch.x != 0)
-                                m.d.sync += scratch.x.eq(scratch.x - 1)
+                                # Scratch X is non-zero and then reg_x is decremented
+                                m.d.comb += do_jmp.eq(reg_x != 0)
+                                m.d.sync += reg_x.eq(reg_x - 1)
                             with m.Case("011"):
                                 # Scratch Y is zero
-                                m.d.comb += do_jmp.eq(scratch.y == 0)
+                                m.d.comb += do_jmp.eq(reg_y == 0)
                             with m.Case("100"):
-                                # Scratch Y is non-zero and then scratch.y is decremented
-                                m.d.comb += do_jmp.eq(scratch.y != 0)
-                                m.d.sync += scratch.y.eq(scratch.y - 1)
+                                # Scratch Y is non-zero and then reg_y is decremented
+                                m.d.comb += do_jmp.eq(reg_y != 0)
+                                m.d.sync += reg_y.eq(reg_y - 1)
                             with m.Case("101"):
                                 # X != Y
-                                m.d.comb += do_jmp.eq(scratch.x != scratch.y)
+                                m.d.comb += do_jmp.eq(reg_x != reg_y)
                             with m.Case("110"):
                                 # branch on input pin
                                 m.next = "NOT_IMPLEMENTED"
@@ -195,10 +191,10 @@ class StateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("001"):
                                 # From Scratch X
-                                m.d.comb += src_data.eq(scratch.x)
+                                m.d.comb += src_data.eq(reg_x)
                             with m.Case("010"):
                                 # Scratch Y
-                                m.d.comb += src_data.eq(scratch.y)
+                                m.d.comb += src_data.eq(reg_y)
                             with m.Case("011"):
                                 m.d.comb += src_data.eq(0)
                             with m.Case("10-"):
@@ -246,10 +242,10 @@ class StateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("001"):
                                 # Scratch X
-                                m.d.sync += scratch.x.eq(shifted_data)
+                                m.d.sync += reg_x.eq(shifted_data)
                             with m.Case("010"):
                                 # Scratch Y
-                                m.d.sync += scratch.y.eq(shifted_data)
+                                m.d.sync += reg_y.eq(shifted_data)
                             with m.Case("011"):
                                 # NULL (discard data)
                                 pass
@@ -321,7 +317,7 @@ class StateMachine(Elaboratable):
                                     m.d.comb += tx_fifo.r_en.eq(1)
                                 # Otherwise, copy scratch X into the OSR
                                 with m.Else():
-                                    m.d.sync += osr.eq(scratch.x)
+                                    m.d.sync += osr.eq(reg_x)
 
                     with m.Elif(decoder.op == Inst.MOV):
                         vars = decoder.mov
@@ -335,10 +331,10 @@ class StateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("001"):
                                 # Load from Scratch X
-                                m.d.comb += src_data.eq(scratch.x)
+                                m.d.comb += src_data.eq(reg_x)
                             with m.Case("010"):
                                 # Load from Scratch Y
-                                m.d.comb += src_data.eq(scratch.y)
+                                m.d.comb += src_data.eq(reg_y)
                             with m.Case("011"):
                                 # Load all zeros
                                 m.d.comb += src_data.eq(0)
@@ -377,10 +373,10 @@ class StateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("001"):
                                 # Scratch X
-                                m.d.sync += scratch.x.eq(modified_src_data)
+                                m.d.sync += reg_x.eq(modified_src_data)
                             with m.Case("010"):
                                 # Scratch Y
-                                m.d.sync += scratch.y.eq(modified_src_data)
+                                m.d.sync += reg_y.eq(modified_src_data)
                             with m.Case("011"):
                                 # Reserved
                                 m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
@@ -438,10 +434,10 @@ class StateMachine(Elaboratable):
                                 m.next = "NOT_IMPLEMENTED"
                             with m.Case("001"):
                                 # Scratch X
-                                m.d.sync += scratch.x.eq(vars.data)
+                                m.d.sync += reg_x.eq(vars.data)
                             with m.Case("010"):
                                 # Scratch Y
-                                m.d.sync += scratch.y.eq(vars.data)
+                                m.d.sync += reg_y.eq(vars.data)
                             with m.Case("100"):
                                 # PINDIRS
                                 m.next = "NOT_IMPLEMENTED"
