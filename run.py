@@ -14,8 +14,8 @@ def bench():
     yield dut.sm[0].exec.wrap_top.eq(1)
     yield dut.sm[0].en.eq(1)
 
-    yield
-    yield
+    for _ in range(5):
+        yield
     
     yield dut.irq.idx.eq(0)
     yield dut.irq.w_data.eq(1)

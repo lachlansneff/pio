@@ -47,7 +47,7 @@ class StateMachine(Elaboratable):
             ("r_en", 1),
             ("r_data", 32),
         ])
-        
+
         self.pc = Signal(cfg.addr_width)
         self.inst = Signal(16)
 
