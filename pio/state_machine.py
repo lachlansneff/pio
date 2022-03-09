@@ -1,19 +1,19 @@
 from amaranth import *
 from amaranth.lib.fifo import SyncFIFO
+from amaranth.lib.io import Pin
 from enum import Enum
+
+from pio.gpio_mapping import GpioMapping, InputMapping, MappedOutput, OutputDest, OutputMapping, Outset
 from .clock_en_divider import ClockEnableDivider
 from .pio import Config, Ctrl
 from .decoder import Inst, PushPull, InstDecoder, Wait
+from .utils import saturating_add
 
 class ErrorReason(Enum):
     NONE = 0
     RESERVED = 1
     INVALID_INST = 1
     BLOCKED_PUSH = 2
-
-def saturating_add(x, y, limit):
-    added = x + y
-    return Mux(added[-1], limit, added[:-1])
 
 class StateMachine(Elaboratable):
     """
@@ -57,6 +57,9 @@ class StateMachine(Elaboratable):
         self.error = Signal()
         self.error_reason = Signal(ErrorReason)
 
+        self.mapped_output = MappedOutput()
+        self.gpio_input = Signal(32)
+
     def increment_pc(self, m: Module):
         with m.If(self.pc == self.ctrl.exec.wrap_top):
             m.d.sync += self.pc.eq(self.ctrl.exec.wrap_bottom)
@@ -68,6 +71,9 @@ class StateMachine(Elaboratable):
 
         m.submodules.clkdiv = clkdiv = ClockEnableDivider(16, 8)
         m.submodules.decoder = decoder = InstDecoder()
+        m.submodules.output_mapping = omap = OutputMapping()
+        m.submodules.input_mappingg = imap = InputMapping()
+
         # State
         reg_x = Signal(32)
         reg_y = Signal(32)
@@ -89,11 +95,39 @@ class StateMachine(Elaboratable):
         # This can either run the current instruction again on the next clock cycle
         # or be used to tell the state machine not to advance the PC this cycle.
         stall_next = Signal()
-        wait = Wait(stall_next)
+        wait = Wait()
         skip_delay = Signal()
 
         exec_injected_inst = Signal()
         injected_inst = Signal(16)
+
+        wait_over = Signal()
+        with m.If(wait.check_wait):
+            with m.Switch(wait.source):
+                with m.Case(Wait.Source.IRQ):
+                    m.d.comb += self.irq_port.idx.eq(wait.irq_idx)
+                    with m.If(self.irq_port.r_data == wait.polarity):
+                        # The bit has changed!
+                        m.d.comb += wait_over.eq(1)
+
+                        # Clear the IRQ bit if we're waiting for 1.
+                        with m.If(wait.polarity == Wait.Polarity.WAIT_FOR_1):
+                            m.d.comb += [
+                                self.irq_port.w_data.eq(0),
+                                self.irq_port.w_stb.eq(1),
+                            ]
+                with m.Case(Wait.Source.GPIO):
+                    pin = Array(self.gpio_input)[wait.gpio_pin_index]
+                    with m.If(pin == wait.polarity):
+                        # Pin has changed!
+                        m.d.comb += wait_over.eq(1)
+                with m.Case(Wait.Source.PIN):
+                    pin = Array(imap.mapped_data)[wait.gpio_pin_index]
+                    with m.If(pin == wait.polarity):
+                        # Pin has changed!
+                        m.d.comb += wait_over.eq(1)
+            with m.If(~wait_over):
+                m.d.comb += stall_next.eq(1)
 
         with m.If(exec_injected_inst):
             m.d.sync += exec_injected_inst.eq(0)
@@ -102,6 +136,8 @@ class StateMachine(Elaboratable):
             m.d.comb += decoder.inst.eq(self.inst),
 
         m.d.comb += [
+            decoder.sideset_count.eq(self.ctrl.pin.sideset_count),
+
             clkdiv.en.eq(self.ctrl.en),
             
             # Hook TX FIFO
@@ -113,6 +149,20 @@ class StateMachine(Elaboratable):
             self.rx_fifo.r_rdy.eq(rx_fifo.r_rdy),
             rx_fifo.r_en.eq(self.rx_fifo.r_en),
             self.rx_fifo.r_data.eq(rx_fifo.r_data),
+
+            # Hook up GPIO
+            omap.set_base.eq(self.ctrl.pin.set_base),
+            omap.set_count.eq(self.ctrl.pin.set_count),
+            omap.out_base.eq(self.ctrl.pin.out_base),
+            omap.out_count.eq(self.ctrl.pin.out_count),
+            omap.sideset_base.eq(self.ctrl.pin.sideset_base),
+            omap.sideset_count.eq(self.ctrl.pin.sideset_count),
+            omap.sideset_dest.eq(self.ctrl.exec.sideset_pindir),
+            omap.sideset_data.eq(Mux(self.ctrl.exec.side_en, decoder.side_set[:-1], decoder.side_set)),
+            self.mapped_output.eq(omap.out),
+
+            imap.in_data.eq(self.gpio_input),
+            imap.in_base.eq(self.ctrl.pin.in_base),
         ]
         
         with m.If(clkdiv.clk_en):
@@ -130,6 +180,9 @@ class StateMachine(Elaboratable):
                         m.d.sync += delay_counter.eq(decoder.delay)
                         m.d.comb += stall_next.eq(1)
                         m.next = "DELAY"
+
+                    with m.If((self.ctrl.exec.side_en & decoder.side_set[-1]) | ~self.ctrl.exec.side_en):
+                        m.d.comb += omap.sideset_stb.eq(1)
 
                     with m.If(decoder.op == Inst.JMP):
                         vars = decoder.jmp
@@ -158,7 +211,7 @@ class StateMachine(Elaboratable):
                                 m.d.comb += do_jmp.eq(reg_x != reg_y)
                             with m.Case("110"):
                                 # branch on input pin
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += do_jmp.eq(Array(self.gpio_input)[self.ctrl.exec.jmp_pin])
                             with m.Case("111"):
                                 # output shift register is not empty
                                 m.d.comb += do_jmp.eq(osr_count != 0)
@@ -170,9 +223,9 @@ class StateMachine(Elaboratable):
                         vars = decoder.wait
                         with m.Switch(vars.src):
                             with m.Case(Wait.Source.GPIO):
-                                m.next = "NOT_IMPLEMENTED"
+                                wait.for_gpio(m, vars.idx, vars.polarity)
                             with m.Case(Wait.Source.PIN):
-                                m.next = "NOT_IMPLEMENTED"
+                                wait.for_pin(m, vars.idx, vars.polarity)
                             with m.Case(Wait.Source.IRQ):
                                 # Decode the IRQ index
                                 irq_idx = Mux(vars.idx[4], vars.idx[:3] + self.id, vars.idx[:3])
@@ -180,6 +233,8 @@ class StateMachine(Elaboratable):
                             with m.Case():
                                 m.next = "ERROR"
                                 m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
+                        with m.If(~wait_over):
+                            m.next = "WAIT"
 
                     with m.Elif(decoder.op == Inst.IN):
                         vars = decoder.in_
@@ -188,7 +243,7 @@ class StateMachine(Elaboratable):
                         with m.Switch(vars.src):
                             with m.Case("000"):
                                 # From PINS
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += src_data.eq(imap.mapped_data)
                             with m.Case("001"):
                                 # From Scratch X
                                 m.d.comb += src_data.eq(reg_x)
@@ -239,7 +294,12 @@ class StateMachine(Elaboratable):
                         with m.Switch(vars.dest):
                             with m.Case("000"):
                                 # PINS
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += [
+                                    omap.outset_stb.eq(1),
+                                    omap.outset_dest.eq(OutputDest.PINS),
+                                    omap.outset_inst.eq(Outset.OUT),
+                                    omap.outset_data.eq(shifted_data),
+                                ]
                             with m.Case("001"):
                                 # Scratch X
                                 m.d.sync += reg_x.eq(shifted_data)
@@ -251,7 +311,12 @@ class StateMachine(Elaboratable):
                                 pass
                             with m.Case("100"):
                                 # PINDIRS
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += [
+                                    omap.outset_stb.eq(1),
+                                    omap.outset_dest.eq(OutputDest.PINDIRS),
+                                    omap.outset_inst.eq(Outset.OUT),
+                                    omap.outset_data.eq(shifted_data),
+                                ]
                             with m.Case("101"):
                                 # PC
                                 m.d.sync += self.pc.eq(shifted_data)
@@ -328,7 +393,7 @@ class StateMachine(Elaboratable):
                         with m.Switch(vars.src):
                             with m.Case("000"):
                                 # PINS
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += src_data.eq(imap.mapped_data)
                             with m.Case("001"):
                                 # Load from Scratch X
                                 m.d.comb += src_data.eq(reg_x)
@@ -370,7 +435,12 @@ class StateMachine(Elaboratable):
                         with m.Switch(vars.dest):
                             with m.Case("000"):
                                 # PINS
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += [
+                                    omap.outset_stb.eq(1),
+                                    omap.outset_dest.eq(OutputDest.PINS),
+                                    omap.outset_inst.eq(Outset.OUT),
+                                    omap.outset_data.eq(modified_src_data),
+                                ]
                             with m.Case("001"):
                                 # Scratch X
                                 m.d.sync += reg_x.eq(modified_src_data)
@@ -431,7 +501,12 @@ class StateMachine(Elaboratable):
                         with m.Switch(vars.dest):
                             with m.Case("000"):
                                 # PINS
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += [
+                                    omap.outset_stb.eq(1),
+                                    omap.outset_dest.eq(OutputDest.PINS),
+                                    omap.outset_inst.eq(Outset.SET),
+                                    omap.outset_data.eq(vars.data),
+                                ]
                             with m.Case("001"):
                                 # Scratch X
                                 m.d.sync += reg_x.eq(vars.data)
@@ -440,7 +515,12 @@ class StateMachine(Elaboratable):
                                 m.d.sync += reg_y.eq(vars.data)
                             with m.Case("100"):
                                 # PINDIRS
-                                m.next = "NOT_IMPLEMENTED"
+                                m.d.comb += [
+                                    omap.outset_stb.eq(1),
+                                    omap.outset_dest.eq(OutputDest.PINDIRS),
+                                    omap.outset_inst.eq(Outset.SET),
+                                    omap.outset_data.eq(vars.data),
+                                ]
                             with m.Case():
                                 # Reserved
                                 m.d.sync += self.error_reason.eq(ErrorReason.RESERVED)
@@ -454,21 +534,7 @@ class StateMachine(Elaboratable):
                 
                 # Wait for a selected IRQ bit to become zero
                 with m.State("WAIT"):
-                    wait_over = Signal()
-                    with m.Switch(wait.source):
-                        with m.Case(Wait.Source.IRQ):
-                            m.d.comb += self.irq_port.idx.eq(wait.irq_idx)
-                            with m.If(self.irq_port.r_data == wait.polarity):
-                                # The bit has changed!
-                                m.d.comb += wait_over.eq(1)
-
-                                # Clear the IRQ bit if we're waiting for 1.
-                                with m.If(wait.polarity == Wait.Polarity.WAIT_FOR_1):
-                                    m.d.comb += [
-                                        self.irq_port.w_data.eq(0),
-                                        self.irq_port.w_stb.eq(1),
-                                    ]
-                                    # m.d.sync += self.irq.bit_select(wait.irq_idx, 1).eq(0)
+                    m.d.comb += wait.check_wait.eq(1)
 
                     with m.If(wait_over):
                         with m.If(decoder.delay != 0):

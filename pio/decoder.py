@@ -1,5 +1,6 @@
 from amaranth import *
 from enum import Enum
+from .utils import bitmask
 
 class Inst(Enum):
     JMP = 0b000
@@ -19,10 +20,12 @@ class InstDecoder(Elaboratable):
     def __init__(self):
         # In
         self.inst = Signal(16)
+        self.sideset_count = Signal(3)
 
         # Out
         self.op = Signal(Inst)
         self.delay = Signal(5)
+        self.side_set = Signal(5)
         
         # Only relevent with `op == Inst.PUSH_PULL`
         self.push_pull = Signal(PushPull)
@@ -77,11 +80,16 @@ class InstDecoder(Elaboratable):
 
         rest = Signal(8)
 
+        delay_and_sideset = self.inst.bit_select(8, 5)
+        delay_count = 5 - self.sideset_count
+
         m.d.comb += [
             self.op.eq(self.inst.bit_select(13, 3)),
-            self.delay.eq(self.inst.bit_select(8, 5)),
             self.push_pull.eq(self.inst[7]),
             rest.eq(self.inst.bit_select(0, 8)),
+
+            self.side_set.eq(delay_and_sideset >> delay_count),
+            self.delay.eq(delay_and_sideset & bitmask(delay_count)),
 
             self.jmp.eq(rest),
             self.wait.eq(rest),
@@ -111,17 +119,33 @@ class Wait:
         PIN = 0b01
         IRQ = 0b10
 
-    def __init__(self, stall_next):
+    def __init__(self):
         self.source = Signal(self.Source)
         self.polarity = Signal(self.Polarity)
         self.irq_idx = Signal(3)
-        self.stall_next = stall_next
+        self.gpio_pin_index = Signal(32)
+        self.check_wait = Signal()
 
-    def for_irq(self, m: Module, irq_idx, polarity):
+    def for_irq(self, m: Module, irq_idx, polarity: Polarity):
         m.d.sync += [
             self.source.eq(Wait.Source.IRQ),
             self.polarity.eq(polarity),
             self.irq_idx.eq(irq_idx),
         ]
-        m.d.comb += self.stall_next.eq(1)
-        m.next = "WAIT"
+        m.d.comb += self.check_wait.eq(1)
+
+    def for_gpio(self, m: Module, gpio_index, polarity: Polarity):
+        m.d.sync += [
+            self.source.eq(Wait.Source.GPIO),
+            self.polarity.eq(polarity),
+            self.gpio_pin_index.eq(gpio_index),
+        ]
+        m.d.comb += self.check_wait.eq(1)
+
+    def for_pin(self, m: Module, pin_index, polarity: Polarity):
+        m.d.sync += [
+            self.source.eq(Wait.Source.PIN),
+            self.polarity.eq(polarity),
+            self.gpio_pin_index.eq(pin_index),
+        ]
+        m.d.comb += self.check_wait.eq(1)

@@ -30,8 +30,11 @@ class Ctrl:
         ])
 
         self.exec = Record([
+            ("side_en", 1),
+            ("sideset_pindir", 1), # if 1, side-set data changes pindirs instead of pin values
             ("wrap_top", cfg.addr_width),
             ("wrap_bottom", cfg.addr_width),
+            ("jmp_pin", 5),
         ])
         self.exec.wrap_top.reset = cfg.inst_mem_size - 1
 
@@ -40,6 +43,16 @@ class Ctrl:
             ("push_threshold", 5),
             ("in_shiftdir", self.ShiftDirection),
             ("out_shiftdir", self.ShiftDirection),
+        ])
+
+        self.pin = Record([
+            ("sideset_count", 3),
+            ("sideset_base", 5),
+            ("set_base", 5),
+            ("set_count", 3),
+            ("out_base", 5),
+            ("out_count", 5),
+            ("in_base", 5),
         ])
 
         self.en = Signal(1)

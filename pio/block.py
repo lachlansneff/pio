@@ -1,4 +1,7 @@
 from amaranth import *
+from amaranth.lib.io import Pin
+
+from pio.gpio_mapping import GpioMapping
 from .pio import Config, Ctrl
 from .state_machine import StateMachine
 from .irq import Irq
@@ -7,6 +10,7 @@ class Block(Elaboratable):
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.sm = [Ctrl(cfg) for _ in range(cfg.state_machines)]
+        self.gpio = [Pin(1, "io") for _ in range(32)]
 
         self.inst_mem = Record([
             ("w_en", 1),
@@ -41,6 +45,8 @@ class Block(Elaboratable):
             irqport.w_data.eq(self.irq.w_data),
         ]
 
+        m.submodules.gpio_mapping = gpio_mapping = GpioMapping(self.cfg.state_machines, self.gpio)
+
         for id, ctrl in enumerate(self.sm):
             m.submodules[f"sm{id}_rdport"] = rdport = inst_mem.read_port(domain="comb")
             m.submodules[f"sm{id}"] = sm = StateMachine(id=id, cfg=self.cfg, irq_port=irq.port(), ctrl=ctrl)
@@ -48,6 +54,9 @@ class Block(Elaboratable):
             m.d.comb += [
                 rdport.addr.eq(sm.pc),
                 sm.inst.eq(rdport.data),
+
+                sm.gpio_input.eq(gpio_mapping.gpio_in),
+                gpio_mapping.mapped_outputs[id].eq(sm.mapped_output),
             ]
 
         return m

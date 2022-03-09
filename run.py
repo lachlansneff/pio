@@ -20,6 +20,8 @@ def bench():
     yield dut.irq.idx.eq(0)
     yield dut.irq.w_data.eq(1)
     yield dut.irq.w_stb.eq(1)
+    yield
+    yield dut.irq.w_stb.eq(0)
 
     for _ in range(12):
         yield
